@@ -120,38 +120,46 @@ class InteractiveDataset(Dataset):
     def generate_interactions(self, ground_truth_mask, num_interactions=5):
         interactions = []
         
-        positive_coords = np.where(ground_truth_mask > 0)
-        if len(positive_coords[0]) == 0:
-            return interactions
+        # Get mask dimensions
+        D, H, W = ground_truth_mask.shape
+        print(f"\nMask shape in generate_interactions: {ground_truth_mask.shape}")
         
-        # Find the largest connected component
-        from scipy.ndimage import label, binary_dilation
-        labeled_array, num_features = label(ground_truth_mask)
-        if num_features > 0:
-            # Get the largest component
-            largest_component_id = np.argmax([np.sum(labeled_array == i) for i in range(1, num_features + 1)]) + 1
-            largest_component = (labeled_array == largest_component_id)
+        # Find all positive points
+        z_coords, y_coords, x_coords = np.where(ground_truth_mask > 0)
+        if len(z_coords) == 0:
+            print("No positive points found in mask")
+            return interactions
             
-            # Get all points in the largest component
-            z_coords, y_coords, x_coords = np.where(largest_component)
+        # Calculate center of mass
+        center_z = int(np.mean(z_coords))
+        center_y = int(np.mean(y_coords))
+        center_x = int(np.mean(x_coords))
+        
+        print(f"Original center point: ({center_z}, {center_y}, {center_x})")
+        print(f"Coordinate ranges: z=[0,{D-1}], y=[0,{H-1}], x=[0,{W-1}]")
+        
+        # Ensure coordinates are within bounds
+        center_z = np.clip(center_z, 0, D-1)
+        center_y = np.clip(center_y, 0, H-1)
+        center_x = np.clip(center_x, 0, W-1)
+        
+        # Add the center point
+        if ground_truth_mask[center_z, center_y, center_x]:
+            interactions.append((center_z, center_y, center_x, True))
+            print(f"Added interaction point: ({center_z}, {center_y}, {center_x})")
             
-            # Calculate the center point of the largest component
-            center_z = int(np.mean(z_coords))
-            center_y = int(np.mean(y_coords))
-            center_x = int(np.mean(x_coords))
+            # Print a small region around the point to verify it's on the mask
+            z_min = max(0, center_z - 1)
+            z_max = min(D, center_z + 2)
+            y_min = max(0, center_y - 1)
+            y_max = min(H, center_y + 2)
+            x_min = max(0, center_x - 1)
+            x_max = min(W, center_x + 2)
             
-            # Find the closest point on the mask to the center
-            dists = (z_coords - center_z)**2 + (y_coords - center_y)**2 + (x_coords - center_x)**2
-            closest_idx = np.argmin(dists)
-            
-            # Get the final coordinates
-            z = z_coords[closest_idx]
-            y = y_coords[closest_idx]
-            x = x_coords[closest_idx]
-            
-            # Verify the point is on the mask
-            if ground_truth_mask[z, y, x]:
-                interactions.append((z, y, x, True))
+            region = ground_truth_mask[z_min:z_max, y_min:y_max, x_min:x_max]
+            print(f"3x3x3 region around point:\n{region}")
+        else:
+            print(f"Warning: Center point ({center_z}, {center_y}, {center_x}) is not on the mask")
         
         return interactions
 
@@ -724,11 +732,6 @@ class InteractiveTrainer:
         return interactions
 
     def batch_interactive_training_step(self, model, criterion, scaler, optimizer, batch):
-        """
-        5-iteration interactive training:
-        1. 1st iteration: GT center point
-        2. 2nd-5th iterations: GT-output difference based points
-        """
         batch_size = len(batch)
         
         ct_batch = []
@@ -751,11 +754,8 @@ class InteractiveTrainer:
             return None
             
         actual_batch_size = len(ct_batch)
-        optimizer.zero_grad()
         
         try:
-            total_loss = 0.0
-            
             input_batch = torch.zeros(actual_batch_size, 8, *self.target_shape, 
                                     device=self.device, dtype=torch.float16)
             
@@ -806,22 +806,33 @@ class InteractiveTrainer:
                         if is_positive:
                             input_batch[i, 1, z, y, x] = 1.0  
                         else:
-                            input_batch[i, 2, z, y, x] = 1.0  
+                            input_batch[i, 2, z, y, x] = 1.0
                 
-                with torch.cuda.amp.autocast():
-                    outputs = model(input_batch.float())  
-                    loss = criterion(outputs, target_batch)
-                
-                total_loss += loss.item()
-                
-                scaler.scale(loss).backward()
-            
-            scaler.step(optimizer)
-            scaler.update()
+                if iteration < 2:
+                    for param in model.parameters():
+                        param.requires_grad = False
+                    
+                    with torch.no_grad():
+                        outputs = model(input_batch.float())
+                else:
+                    for param in model.parameters():
+                        param.requires_grad = True
+                    
+                    optimizer.zero_grad()
+                    
+                    with torch.cuda.amp.autocast():
+                        outputs = model(input_batch.float())
+                        loss = criterion(outputs, target_batch)
+                    
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                    
+                    final_loss = loss.item()
             
             del input_batch, target_batch, outputs
             
-            return total_loss / 3.0
+            return final_loss
             
         except RuntimeError as e:
             if "out of memory" in str(e):
@@ -835,13 +846,13 @@ class InteractiveTrainer:
             return None
 
 def main():
-    print("=== Interactive nnInteractive Fine-tuning with 5-Point Evaluation ===")
+    print("=== Interactive nnInteractive Fine-tuning with 3-Iteration Training ===")
     print("This script will:")
     print("1. Load pretrained nnInteractive model")
     print("2. Evaluate pretrained model performance with 5 interaction points")
-    print("3. Fine-tune with 5-iteration interactive training:")
-    print("   - 1st iteration: GT center point")  
-    print("   - 2nd-5th iterations: GT-output difference based points")
+    print("3. Fine-tune with 3-iteration interactive training:")
+    print("   - 1st-2nd iterations: Frozen model (no gradient updates)")  
+    print("   - 3rd iteration: Calculate loss and update parameters")
     print("4. Evaluate after each epoch and compare with pretrained performance")
     print("5. Save final model and training history")
     print("=" * 70)

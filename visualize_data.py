@@ -83,6 +83,14 @@ def visualize_preprocessing_steps(data_root, preprocessed_path, case_name, organ
     print(f"Mask shape: {organ_mask.shape}")
     print(f"Number of positive voxels in mask: {np.sum(organ_mask > 0)}")
     
+    # Find the center of the mask
+    if np.sum(organ_mask > 0) > 0:
+        z_coords, y_coords, x_coords = np.where(organ_mask > 0)
+        center_z = int(np.mean(z_coords))
+        center_y = int(np.mean(y_coords))
+        center_x = int(np.mean(x_coords))
+        print(f"\nMask center: ({center_z}, {center_y}, {center_x})")
+    
     if interactions:
         plt.figure(figsize=(15, 5))
         window_center = 40   # Soft tissue window
@@ -94,58 +102,105 @@ def visualize_preprocessing_steps(data_root, preprocessed_path, case_name, organ
             print(f"\nVisualization coordinates:")
             print(f"Original point: z={z}, y={y}, x={x}")
             
+            # Normalize coordinates to [0, 1] range
+            z_norm = z / ct_array.shape[0]
+            y_norm = y / ct_array.shape[1]
+            x_norm = x / ct_array.shape[2]
+            
+            print(f"\nNormalized coordinates: ({z_norm:.3f}, {y_norm:.3f}, {x_norm:.3f})")
+            
             # Try different coordinate mappings
             mappings = [
                 # Original mapping
-                {'z': z, 'y': y, 'x': x},
-                # Flipped y and z
-                {'z': z, 'y': ct_array.shape[1]-y, 'x': x},
-                # Flipped x
-                {'z': z, 'y': y, 'x': ct_array.shape[2]-x},
-                # All flipped
-                {'z': ct_array.shape[0]-z, 'y': ct_array.shape[1]-y, 'x': ct_array.shape[2]-x}
+                {'z': z, 'y': y, 'x': x, 'name': 'Original'},
+                # Scale to image dimensions
+                {
+                    'z': int(z_norm * ct_array.shape[0]),
+                    'y': int(y_norm * ct_array.shape[1]),
+                    'x': int(x_norm * ct_array.shape[2]),
+                    'name': 'Scaled'
+                },
+                # Centered mapping
+                {
+                    'z': int(ct_array.shape[0] // 2 + (z - ct_array.shape[0] // 2) * 0.5),
+                    'y': int(ct_array.shape[1] // 2 + (y - ct_array.shape[1] // 2) * 0.5),
+                    'x': int(ct_array.shape[2] // 2 + (x - ct_array.shape[2] // 2) * 0.5),
+                    'name': 'Centered'
+                },
+                # Relative to mask center
+                {
+                    'z': center_z + (z - center_z) // 2,
+                    'y': center_y + (y - center_y) // 2,
+                    'x': center_x + (x - center_x) // 2,
+                    'name': 'Relative to Center'
+                }
             ]
             
             for idx, mapping in enumerate(mappings):
                 # Create a new figure for each mapping
                 plt.figure(figsize=(15, 5))
                 
+                # Get original spacing from nnUNet properties
+                spacing = [2.0, 0.6826171875, 0.6826171875]  # [z, y, x]
+                # Adjust figure size based on aspect ratios
+                plt.figure(figsize=(15, 15))  # Make it square
+                
+                # Calculate subplot positions for better layout
+                gs = plt.GridSpec(1, 3, width_ratios=[1, 1, 1], wspace=0.3)
+                
+                # Calculate display ratios
+                aspect_yx = 1.0  # Keep axial view square
+                aspect_zx = spacing[2] / spacing[0] * 2  # Adjust coronal view
+                aspect_zy = spacing[1] / spacing[0] * 2  # Adjust sagittal view
+
                 # Axial view (z-plane)
-                plt.subplot(1, 3, 1)
+                plt.subplot(gs[0])
                 ct_slice = ct_array[mapping['z']] * 2000 - 1000
-                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax)
+                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax, aspect=aspect_yx)
                 mask_overlay = np.zeros((*ct_slice.shape, 4))
                 mask_overlay[organ_mask[mapping['z']] > 0] = [1, 0, 0, 0.3]
-                plt.imshow(mask_overlay)
+                plt.imshow(mask_overlay, aspect=aspect_yx)
                 plt.plot(mapping['x'], mapping['y'], 'r+' if is_positive else 'b+', markersize=15, linewidth=2)
                 plt.title(f'Axial View (z={mapping["z"]})')
                 plt.axis('off')
                 
                 # Coronal view (y-plane)
-                plt.subplot(1, 3, 2)
-                ct_slice = ct_array[:, mapping['y'], :].T * 2000 - 1000
-                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax)
+                plt.subplot(gs[1])
+                ct_slice = ct_array[:, mapping['y'], :] * 2000 - 1000
+                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax, aspect=aspect_zx)
                 mask_overlay = np.zeros((*ct_slice.shape, 4))
-                mask_overlay[organ_mask[:, mapping['y'], :].T > 0] = [1, 0, 0, 0.3]
-                plt.imshow(mask_overlay)
+                mask_overlay[organ_mask[:, mapping['y'], :] > 0] = [1, 0, 0, 0.3]
+                plt.imshow(mask_overlay, aspect=aspect_zx)
                 plt.plot(mapping['x'], mapping['z'], 'r+' if is_positive else 'b+', markersize=15, linewidth=2)
                 plt.title(f'Coronal View (y={mapping["y"]})')
                 plt.axis('off')
                 
                 # Sagittal view (x-plane)
-                plt.subplot(1, 3, 3)
-                ct_slice = ct_array[:, :, mapping['x']].T * 2000 - 1000
-                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax)
+                plt.subplot(gs[2])
+                ct_slice = ct_array[:, :, mapping['x']] * 2000 - 1000
+                plt.imshow(ct_slice, cmap='gray', vmin=vmin, vmax=vmax, aspect=aspect_zy)
                 mask_overlay = np.zeros((*ct_slice.shape, 4))
-                mask_overlay[organ_mask[:, :, mapping['x']].T > 0] = [1, 0, 0, 0.3]
-                plt.imshow(mask_overlay)
+                mask_overlay[organ_mask[:, :, mapping['x']] > 0] = [1, 0, 0, 0.3]
+                plt.imshow(mask_overlay, aspect=aspect_zy)
                 plt.plot(mapping['y'], mapping['z'], 'r+' if is_positive else 'b+', markersize=15, linewidth=2)
                 plt.title(f'Sagittal View (x={mapping["x"]})')
                 plt.axis('off')
                 
-                plt.suptitle(f"Mapping {idx+1} - Point ({mapping['z']}, {mapping['y']}, {mapping['x']})")
+                # Ensure coordinates are within bounds
+                z = np.clip(mapping['z'], 0, ct_array.shape[0]-1)
+                y = np.clip(mapping['y'], 0, ct_array.shape[1]-1)
+                x = np.clip(mapping['x'], 0, ct_array.shape[2]-1)
+                
+                # Print the mask value at the interaction point
+                mask_value = organ_mask[z, y, x]
+                print(f"\nMapping '{mapping['name']}':")
+                print(f"Mapped point: ({z}, {y}, {x})")
+                print(f"Mask value at point: {mask_value}")
+                
+                plt.suptitle(f"{mapping['name']} Mapping - Point ({z}, {y}, {x})\nMask value: {mask_value}")
                 plt.tight_layout()
-                plt.savefig(output_dir / f"{case_name}_{organ_name}_mapping{idx+1}.png", dpi=150, bbox_inches='tight')
+                plt.savefig(output_dir / f"{case_name}_{organ_name}_{mapping['name'].lower().replace(' ', '_')}.png", 
+                          dpi=150, bbox_inches='tight')
                 plt.close()
     
     print(f"\nVisualization results saved to {output_dir}")
