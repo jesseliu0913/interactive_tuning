@@ -1,0 +1,140 @@
+_wandb:
+    value:
+        cli_version: 0.21.1
+        e:
+            lhlexjmef8a0djdd082fd6d9635r3an0:
+                codePath: training_with_eval.py
+                codePathLocal: training_with_eval.py
+                cpu_count: 48
+                cpu_count_logical: 96
+                cudaVersion: "12.6"
+                disk:
+                    /:
+                        total: "81978257408"
+                        used: "29940555776"
+                email: l.zijie@wustl.edu
+                executable: /home/jesseliu/miniconda3/envs/segment/bin/python
+                git:
+                    commit: dd9ab27dd09054e2fa9410c8d9554e57122a9b62
+                    remote: git@github.com:jesseliu0913/interactive_tuning.git
+                gpu: NVIDIA RTX 6000 Ada Generation
+                gpu_count: 8
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-42305fdd-5c1d-e89b-2547-7834c575c10d
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-7f59c4ee-b27a-edf6-f980-9071e7e85609
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-17cefd43-afe5-f6d3-5399-49d5c8b1acf6
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-7e32c56b-8e79-1998-7ba3-b04e31870441
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-740068e1-11c8-3f62-da23-26f3cd704ae5
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-748263d4-86a9-62c6-e441-d73e7b71b4b1
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-fbf9c3a8-22bc-e04d-3af1-74dba14a85d6
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "51527024640"
+                      name: NVIDIA RTX 6000 Ada Generation
+                      uuid: GPU-7d037df6-2b29-662f-1b04-131867bb7d6e
+                host: unites4.cs.unc.edu
+                memory:
+                    total: "540861857792"
+                os: Linux-6.8.0-71-generic-x86_64-with-glibc2.39
+                program: /playpen/jesse/interactive_tuning/training_with_eval.py
+                python: CPython 3.11.11
+                root: /playpen/jesse/interactive_tuning
+                startedAt: "2025-08-11T05:35:45.303701Z"
+                writerId: lhlexjmef8a0djdd082fd6d9635r3an0
+        m: []
+        python_version: 3.11.11
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+                - 5
+                - 53
+            "3":
+                - 2
+                - 13
+                - 15
+                - 16
+            "4": 3.11.11
+            "5": 0.21.1
+            "12": 0.21.1
+            "13": linux-x86_64
+architecture:
+    value: nnInteractive
+batch_size:
+    value: 2
+ce_weight:
+    value: 1
+dataset:
+    value: HaN-Seg
+device:
+    value: cuda
+dice_weight:
+    value: 1
+gpu_memory_gb:
+    value: 50.896961536
+gpu_name:
+    value: NVIDIA RTX 6000 Ada Generation
+learning_rate:
+    value: 1e-05
+loss_function:
+    value: OrganFocusedCEDiceLoss
+min_delta:
+    value: 0.01
+model_parameters:
+    value: 102355818
+model_path:
+    value: /playpen/jesse/image_seg/nninteract/nnInteractive_v1.0
+num_epochs:
+    value: 10
+optimizer:
+    value: Adam
+organ_weight:
+    value: 5
+patience:
+    value: 3
+scheduler:
+    value: ReduceLROnPlateau
+target_shape:
+    value:
+        - 128
+        - 512
+        - 512
+test_samples:
+    value: 162
+total_samples:
+    value: 810
+train_samples:
+    value: 648
+trainable_parameters:
+    value: 102355818
+training_strategy:
+    value: 3-iteration_interactive
