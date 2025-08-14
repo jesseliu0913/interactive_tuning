@@ -973,3 +973,5 @@ def main():
     
 if __name__ == "__main__":
     main()
+
+# nohup python training_and_eval.py > logs/training_and_eval.log 2>&1 &
