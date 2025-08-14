@@ -21,98 +21,81 @@ import torch.nn.functional as F
 current_dir = Path(__file__).parent
 
 class NormalizedFocalLoss(nn.Module):
-    """Normalized Focal Loss for multi-class segmentation"""
-    def __init__(self, alpha=1.0, gamma=2.0, num_classes=None, ignore_index=-1):
+    """Normalized Focal Loss for binary interactive segmentation"""
+    def __init__(self, alpha=0.25, gamma=2.0, num_classes=2, ignore_index=255):
         super(NormalizedFocalLoss, self).__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+
+        self.alpha = alpha  
+        self.gamma = gamma  
         self.num_classes = num_classes
         self.ignore_index = ignore_index
         
     def forward(self, inputs, targets):
-        # inputs: (N, C, D, H, W) - logits
-        # targets: (N, D, H, W) - class indices
+        valid_mask = (targets != self.ignore_index)
         
-        # Get softmax probabilities
-        probs = F.softmax(inputs, dim=1)
+        if self.num_classes == 2:
+            organ_logits = inputs[:, 1]  # (N, D, H, W)
+            organ_probs = torch.sigmoid(organ_logits)
+            
+            targets_binary = (targets > 0).float()
+            
+            eps = 1e-8
+            bce_loss = -(targets_binary * torch.log(organ_probs + eps) + 
+                        (1 - targets_binary) * torch.log(1 - organ_probs + eps))
+            
+            pt = torch.where(targets_binary == 1, organ_probs, 1 - organ_probs)
+            alpha_t = torch.where(targets_binary == 1, self.alpha, 1 - self.alpha)
+
+            # Apply focal loss formula: -alpha_t * (1-pt)^gamma * BCE
+            focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
+            
+        else:
+            ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
+            pt = torch.exp(-ce_loss)
+            focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
         
-        # Compute cross entropy loss (without reduction)
-        ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
-        
-        # Get the probability of the true class for each pixel
-        # Create one-hot encoding of targets
-        targets_one_hot = F.one_hot(targets.clamp(0, self.num_classes-1), num_classes=self.num_classes)
-        targets_one_hot = targets_one_hot.permute(0, 4, 1, 2, 3).float()  # (N, C, D, H, W)
-        
-        # Get probability of true class
-        pt = (probs * targets_one_hot).sum(dim=1)  # (N, D, H, W)
-        
-        # Apply focal loss formula: alpha * (1-pt)^gamma * CE_loss
-        focal_weight = self.alpha * (1 - pt) ** self.gamma
-        focal_loss = focal_weight * ce_loss
-        
-        # Create mask for valid pixels (exclude ignore_index if used)
-        if self.ignore_index >= 0:
-            valid_mask = (targets != self.ignore_index)
-            if valid_mask.sum() > 0:
-                normalized_loss = focal_loss[valid_mask].mean()
-            else:
-                normalized_loss = focal_loss.mean()
+
+        if valid_mask.sum() > 0:
+            normalized_loss = focal_loss[valid_mask].mean()
         else:
             normalized_loss = focal_loss.mean()
             
         return normalized_loss
 
 class DiceLoss(nn.Module):
-    """Dice Loss for multi-class segmentation"""
-    def __init__(self, smooth=1.0, ignore_index=-1):
+    """Dice Loss for binary interactive segmentation"""
+    def __init__(self, smooth=1.0, ignore_index=255):
         super(DiceLoss, self).__init__()
         self.smooth = smooth
         self.ignore_index = ignore_index
         
     def forward(self, inputs, targets):
-        # inputs: (N, C, D, H, W) - logits
-        # targets: (N, D, H, W) - class indices
+
+        if inputs.shape[1] == 2:
+            organ_logits = inputs[:, 1]  # (N, D, H, W)
+            organ_probs = torch.sigmoid(organ_logits)
+        else:
+            probs = F.softmax(inputs, dim=1)
+            organ_probs = probs[:, 1] 
+
+        targets_binary = (targets > 0).float()
         
-        # Convert logits to probabilities
-        probs = F.softmax(inputs, dim=1)
+        valid_mask = (targets != self.ignore_index).float()
         
-        # Convert targets to one-hot encoding
-        num_classes = inputs.shape[1]
-        targets_one_hot = F.one_hot(targets.clamp(0, num_classes-1), num_classes=num_classes)
-        targets_one_hot = targets_one_hot.permute(0, 4, 1, 2, 3).float()  # (N, C, D, H, W)
+        organ_probs = organ_probs * valid_mask
+        targets_binary = targets_binary * valid_mask
+
+        intersection = (organ_probs * targets_binary).sum()
+        union = organ_probs.sum() + targets_binary.sum()
         
-        # Create mask for valid pixels (only if ignore_index is specified)
-        if self.ignore_index >= 0:
-            valid_mask = (targets != self.ignore_index).float()
-            valid_mask = valid_mask.unsqueeze(1).expand_as(probs)
-            
-            # Apply mask
-            probs = probs * valid_mask
-            targets_one_hot = targets_one_hot * valid_mask
-        
-        # Compute Dice coefficient for each class
-        dice_scores = []
-        for c in range(num_classes):
-            pred_c = probs[:, c]
-            target_c = targets_one_hot[:, c]
-            
-            intersection = (pred_c * target_c).sum()
-            union = pred_c.sum() + target_c.sum()
-            
-            dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
-            dice_scores.append(dice)
-        
-        # Average Dice across classes
-        dice_score = torch.stack(dice_scores).mean()
-        
-        # Return Dice loss (1 - Dice coefficient)
-        return 1.0 - dice_score
+        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
+
+        return 1.0 - dice
 
 class CombinedLoss(nn.Module):
     """Combined Normalized Focal Loss + Dice Loss"""
     def __init__(self, focal_weight=1.0, dice_weight=1.0, alpha=1.0, gamma=2.0, 
-                 smooth=1.0, num_classes=None, ignore_index=255):
+                 smooth=1.0, num_classes=2, ignore_index=255):
         super(CombinedLoss, self).__init__()
         self.focal_weight = focal_weight
         self.dice_weight = dice_weight
@@ -140,11 +123,29 @@ class InteractiveDataset(Dataset):
         with open(self.data_root / "dataset.json", 'r') as f:
             self.dataset_info = json.load(f)
         
-        nnunet_preprocessed = Path("/playpen/jesse/image_seg/hanseg_code_ct/nnUNet_preprocessed/Dataset100_HaNSeg")
-        with open(nnunet_preprocessed / "splits_final.json", 'r') as f:
-            self.splits = json.load(f)
+        nnunet_preprocessed = Path("/playpen/jesse/interactive_tuning/hanseg_data_ct/nnUNet_preprocessed/Dataset100_HaNSeg")
         
-        self.training_cases = self.splits[0]['train']
+        # Define test cases manually (these will be excluded from training)
+        test_cases = {'case_04', 'case_10', 'case_11', 'case_19', 'case_26', 'case_27', 'case_38', 'case_40'}
+        
+        # Get all available cases and exclude test cases for training
+        all_cases = []
+        if self.use_preprocessed:
+            preprocessed_3d_path = nnunet_preprocessed / "nnUNetPlans_3d_fullres"
+            for pkl_file in preprocessed_3d_path.glob("case_*.pkl"):
+                case_name = pkl_file.stem
+                if case_name not in test_cases:
+                    all_cases.append(case_name)
+        else:
+            # For raw data, check imagesTr folder
+            images_tr_path = self.data_root / "imagesTr"
+            for img_file in images_tr_path.glob("case_*_0000.nii.gz"):
+                case_name = img_file.stem.replace('_0000', '')
+                if case_name not in test_cases:
+                    all_cases.append(case_name)
+        
+        self.training_cases = sorted(all_cases)
+        print(f"Training cases: {len(self.training_cases)} (excluding {len(test_cases)} test cases)")
         self.organs = list(self.dataset_info['labels'].keys())
         self.organs.remove('background')
         
@@ -316,7 +317,7 @@ class HaNSegEvaluator:
         self.use_preprocessed = use_preprocessed
         
         if self.use_preprocessed:
-            self.preprocessed_path = Path("/playpen/jesse/image_seg/hanseg_code_ct/nnUNet_preprocessed/Dataset100_HaNSeg/nnUNetPlans_3d_fullres")
+            self.preprocessed_path = Path("/playpen/jesse/interactive_tuning/hanseg_data_ct/nnUNet_preprocessed/Dataset100_HaNSeg/nnUNetPlans_3d_fullres")
             print(f"Evaluator using nnUNet preprocessed data from: {self.preprocessed_path}")
         else:
             print(f"Evaluator using raw HaN-Seg data (recommended for test set evaluation)")
@@ -502,16 +503,9 @@ class HaNSegEvaluator:
     def quick_eval(self, hanseg_root, eval_cases=None, num_interactions=5):
         """Quick evaluation on subset of cases"""
         if eval_cases is None:
-            test_images_dir = Path("/playpen/jesse/image_seg/hanseg_code_ct/nnUNet_raw/Dataset100_HaNSeg/imagesTs")
-            
-            test_files = list(test_images_dir.glob("*_0000.nii.gz"))
-            eval_cases = []
-            for f in test_files:
-                case_name = f.stem.replace('_0000', '').replace('.nii', '')
-                eval_cases.append(case_name)
-            
-            eval_cases = sorted(eval_cases)
-            print(f"Using actual test set cases: {len(eval_cases)} cases")
+            # Use specific test cases from the new preprocessed data folder
+            eval_cases = ['case_04', 'case_10', 'case_11', 'case_19', 'case_26', 'case_27', 'case_38', 'case_40']
+            print(f"Using specific test set cases: {len(eval_cases)} cases")
             print(f"Test cases: {eval_cases}")
         
         hanseg_root = Path(hanseg_root)
@@ -608,7 +602,7 @@ class InteractiveTrainer:
             return None
 
         dataset = InteractiveDataset(
-            data_root="/playpen/jesse/image_seg/hanseg_code_ct/nnUNet_raw/Dataset100_HaNSeg",
+            data_root="/playpen/jesse/interactive_tuning/hanseg_data_ct/nnUNet_preprocessed/Dataset100_HaNSeg",
             target_shape=self.target_shape,
             use_preprocessed=True 
         )
@@ -668,20 +662,19 @@ class InteractiveTrainer:
             optimizer, mode='max', factor=0.5, patience=2, 
             min_lr=1e-6
         )
-        # Get number of classes from dataset info
-        num_classes = len(dataset.dataset_info['labels'])  # includes background
-        print(f"Number of classes for loss function: {num_classes}")
+
+        num_classes = 2  
+        print(f"Number of classes for loss function: {num_classes} (binary interactive segmentation)")
         
-        # Initialize combined loss (Normalized Focal Loss + Dice Loss)
-        # Reduce focal weight since it might be too aggressive
+
         criterion = CombinedLoss(
-            focal_weight=0.5,    # Reduced weight for focal loss
-            dice_weight=2.0,     # Higher weight for dice loss (more stable)
+            focal_weight=0.5,    # weight for focal loss
+            dice_weight=2.0,     # weight for dice loss 
             alpha=0.25,          # Reduced alpha for less aggressive focusing
             gamma=1.5,           # Reduced gamma for gentler focusing
             smooth=1.0,          # Dice loss smoothing
             num_classes=num_classes,
-            ignore_index=-1      # Don't ignore any pixels (-1 means no ignore)
+            ignore_index=255    
         )
         print("Using Combined Loss: Normalized Focal Loss + Dice Loss")
         print(f"Loss weights - Focal: {criterion.focal_weight}, Dice: {criterion.dice_weight}")
@@ -937,6 +930,9 @@ class InteractiveTrainer:
                     
                     with torch.cuda.amp.autocast():
                         outputs = model(input_batch.float())
+                        # Debug: Print output shape to verify it matches our binary classification expectation
+                        if iteration == 2 and i == 0:  # Only print once per epoch
+                            print(f"Model output shape: {outputs.shape} (expected: [batch_size, 2, D, H, W] for binary)")
                         combined_loss, focal_loss, dice_loss = criterion(outputs, target_batch)
                     
                     scaler.scale(combined_loss).backward()
@@ -970,11 +966,10 @@ class InteractiveTrainer:
             return None
 
 def main():
-
     trainer = InteractiveTrainer()
     model = trainer.train()
 
     print("\nFine-tuning completed!")
-
+    
 if __name__ == "__main__":
     main()
