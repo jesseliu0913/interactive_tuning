@@ -20,90 +20,113 @@ import torch.nn.functional as F
 
 current_dir = Path(__file__).parent
 
-class NormalizedFocalLoss(nn.Module):
-    """Normalized Focal Loss for binary interactive segmentation"""
-    def __init__(self, alpha=0.25, gamma=2.0, num_classes=2, ignore_index=255):
-        super(NormalizedFocalLoss, self).__init__()
-
+class InteractiveFocalLoss(nn.Module):
+    """Focal Loss specifically designed for interactive segmentation"""
+    def __init__(self, alpha=0.25, gamma=2.0, ignore_index=255):
+        super(InteractiveFocalLoss, self).__init__()
         self.alpha = alpha  
-        self.gamma = gamma  
-        self.num_classes = num_classes
+        self.gamma = gamma 
         self.ignore_index = ignore_index
         
     def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: (N, C, D, H, W) - model logits (C could be 2 or more)
+            targets: (N, D, H, W) - binary targets (0=background, 1=organ)
+        """
+        targets_binary = (targets > 0).long() 
+        
+        # Create valid mask
         valid_mask = (targets != self.ignore_index)
         
-        if self.num_classes == 2:
-            organ_logits = inputs[:, 1]  # (N, D, H, W)
-            organ_probs = torch.sigmoid(organ_logits)
-            
-            targets_binary = (targets > 0).float()
-            
-            eps = 1e-8
-            bce_loss = -(targets_binary * torch.log(organ_probs + eps) + 
-                        (1 - targets_binary) * torch.log(1 - organ_probs + eps))
-            
-            pt = torch.where(targets_binary == 1, organ_probs, 1 - organ_probs)
-            alpha_t = torch.where(targets_binary == 1, self.alpha, 1 - self.alpha)
-
-            # Apply focal loss formula: -alpha_t * (1-pt)^gamma * BCE
-            focal_loss = alpha_t * (1 - pt) ** self.gamma * bce_loss
-            
+        if inputs.shape[1] == 2:
+            ce_loss = F.cross_entropy(inputs, targets_binary, reduction='none')
+            probs = F.softmax(inputs, dim=1)
+            pt = probs.gather(1, targets_binary.unsqueeze(1)).squeeze(1)
         else:
-            ce_loss = F.cross_entropy(inputs, targets, reduction='none', ignore_index=self.ignore_index)
-            pt = torch.exp(-ce_loss)
-            focal_loss = self.alpha * (1 - pt) ** self.gamma * ce_loss
+            background_logits = inputs[:, 0]  # Background class
+            foreground_logits = torch.logsumexp(inputs[:, 1:], dim=1)  # Any organ class
+            binary_logits = torch.stack([background_logits, foreground_logits], dim=1)
+            
+            ce_loss = F.cross_entropy(binary_logits, targets_binary, reduction='none')
+            probs = F.softmax(binary_logits, dim=1)
+            pt = probs.gather(1, targets_binary.unsqueeze(1)).squeeze(1)
         
-
+        pt = torch.clamp(pt, min=1e-8, max=1-1e-8)
+        
+        alpha_t = torch.where(targets_binary == 1, self.alpha, 1 - self.alpha)
+        
+        focal_weight = (1 - pt) ** self.gamma
+        
+        focal_loss = alpha_t * focal_weight * ce_loss
+        
         if valid_mask.sum() > 0:
-            normalized_loss = focal_loss[valid_mask].mean()
+            return focal_loss[valid_mask].mean()
         else:
-            normalized_loss = focal_loss.mean()
-            
-        return normalized_loss
+            return torch.tensor(0.0, device=inputs.device, requires_grad=True)
 
-class DiceLoss(nn.Module):
-    """Dice Loss for binary interactive segmentation"""
+class InteractiveDiceLoss(nn.Module):
+    """Dice Loss specifically designed for interactive segmentation"""
     def __init__(self, smooth=1.0, ignore_index=255):
-        super(DiceLoss, self).__init__()
+        super(InteractiveDiceLoss, self).__init__()
         self.smooth = smooth
         self.ignore_index = ignore_index
         
     def forward(self, inputs, targets):
-
-        if inputs.shape[1] == 2:
-            organ_logits = inputs[:, 1]  # (N, D, H, W)
-            organ_probs = torch.sigmoid(organ_logits)
-        else:
-            probs = F.softmax(inputs, dim=1)
-            organ_probs = probs[:, 1] 
-
+        """
+        Args:
+            inputs: (N, C, D, H, W) - model logits
+            targets: (N, D, H, W) - binary targets (0=background, 1=organ)
+        """
         targets_binary = (targets > 0).float()
         
         valid_mask = (targets != self.ignore_index).float()
         
+        if inputs.shape[1] == 2:
+            probs = F.softmax(inputs, dim=1)
+            organ_probs = probs[:, 1] 
+        else:
+            probs = F.softmax(inputs, dim=1)
+            organ_probs = 1.0 - probs[:, 0]  
+        
         organ_probs = organ_probs * valid_mask
         targets_binary = targets_binary * valid_mask
-
-        intersection = (organ_probs * targets_binary).sum()
-        union = organ_probs.sum() + targets_binary.sum()
         
-        dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        batch_size = inputs.shape[0]
+        dice_scores = []
+        
+        for i in range(batch_size):
+            pred_i = organ_probs[i]
+            target_i = targets_binary[i]
+            valid_i = valid_mask[i]
+            
+            if valid_i.sum() > 0:  
+                intersection = (pred_i * target_i).sum()
+                union = pred_i.sum() + target_i.sum()
+                dice = (2.0 * intersection + self.smooth) / (union + self.smooth)
+                dice_scores.append(dice)
+            else:
+                dice_scores.append(torch.tensor(1.0, device=inputs.device))
+        
+        if dice_scores:
+            avg_dice = torch.stack(dice_scores).mean()
+        else:
+            avg_dice = torch.tensor(1.0, device=inputs.device)
+        
+        return 1.0 - avg_dice
 
-        return 1.0 - dice
-
-class CombinedLoss(nn.Module):
-    """Combined Normalized Focal Loss + Dice Loss"""
-    def __init__(self, focal_weight=1.0, dice_weight=1.0, alpha=1.0, gamma=2.0, 
-                 smooth=1.0, num_classes=2, ignore_index=255):
-        super(CombinedLoss, self).__init__()
+class InteractiveCombinedLoss(nn.Module):
+    """Combined Interactive Focal Loss + Interactive Dice Loss"""
+    def __init__(self, focal_weight=1.0, dice_weight=1.0, alpha=0.25, gamma=2.0, 
+                 smooth=1.0, ignore_index=255):
+        super(InteractiveCombinedLoss, self).__init__()
         self.focal_weight = focal_weight
         self.dice_weight = dice_weight
         
-        self.focal_loss = NormalizedFocalLoss(
-            alpha=alpha, gamma=gamma, num_classes=num_classes, ignore_index=ignore_index
+        self.focal_loss = InteractiveFocalLoss(
+            alpha=alpha, gamma=gamma, ignore_index=ignore_index
         )
-        self.dice_loss = DiceLoss(smooth=smooth, ignore_index=ignore_index)
+        self.dice_loss = InteractiveDiceLoss(smooth=smooth, ignore_index=ignore_index)
         
     def forward(self, inputs, targets):
         focal = self.focal_loss(inputs, targets)
@@ -639,16 +662,16 @@ class InteractiveTrainer:
         model.eval() 
         pretrain_dice = 0.0
         
-        if evaluator is not None:
-            try:
-                pretrain_dice = evaluator.quick_eval(
-                    hanseg_root=self.hanseg_root,
-                    eval_cases=self.eval_cases,
-                    num_interactions=5
-                )
-                print(f"PRETRAINED MODEL - Evaluation Dice: {pretrain_dice:.4f}")
-            except Exception as e:
-                print(f"Pretrained model evaluation failed: {e}")
+        # if evaluator is not None:
+        #     try:
+        #         pretrain_dice = evaluator.quick_eval(
+        #             hanseg_root=self.hanseg_root,
+        #             eval_cases=self.eval_cases,
+        #             num_interactions=5
+        #         )
+        #         print(f"PRETRAINED MODEL - Evaluation Dice: {pretrain_dice:.4f}")
+        #     except Exception as e:
+        #         print(f"Pretrained model evaluation failed: {e}")
         
         print("="*60)
         print("STARTING FINE-TUNING...")
@@ -667,14 +690,13 @@ class InteractiveTrainer:
         print(f"Number of classes for loss function: {num_classes} (binary interactive segmentation)")
         
 
-        criterion = CombinedLoss(
+        criterion = InteractiveCombinedLoss(
             focal_weight=0.5,    # weight for focal loss
             dice_weight=2.0,     # weight for dice loss 
-            alpha=0.25,          # Reduced alpha for less aggressive focusing
-            gamma=1.5,           # Reduced gamma for gentler focusing
+            alpha=0.25,          # alpha for focal loss class balancing
+            gamma=1.5,           # gamma for focal loss focusing
             smooth=1.0,          # Dice loss smoothing
-            num_classes=num_classes,
-            ignore_index=255    
+            ignore_index=255     # ignore invalid pixels
         )
         print("Using Combined Loss: Normalized Focal Loss + Dice Loss")
         print(f"Loss weights - Focal: {criterion.focal_weight}, Dice: {criterion.dice_weight}")
